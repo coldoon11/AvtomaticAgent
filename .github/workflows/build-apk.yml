@@ -32,9 +32,16 @@ jobs:
             echo "sdkmanager not found under $SDKROOT"
             exit 1
           fi
-          echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-36" "platform-tools"
+
+      - name: Download MediaPipe hand model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fL --retry 3 \
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" \
+            -o app/src/main/assets/hand_landmarker.task
+          test -s app/src/main/assets/hand_landmarker.task
 
       - name: Set up Gradle 9.6
         uses: gradle/actions/setup-gradle@v4
