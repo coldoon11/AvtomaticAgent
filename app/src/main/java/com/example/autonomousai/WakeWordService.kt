@@ -112,38 +112,42 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
     }
 
     private fun startListening() {
+        if (!running) return
         val loaded = model ?: return
         if (speechService != null) return
         try {
             val recognizer = Recognizer(loaded, 16_000f)
             speechService = SpeechService(recognizer, 16_000f).also { it.startListening(this) }
             mode = Mode.WAITING
-            updateNotification("Скажи «${wakeWord()}»")
+            updateNotification("Скажи «${displayWakeWord()}»")
         } catch (error: Exception) {
             updateNotification("Микрофон недоступен: ${error.message ?: "ошибка"}")
         }
     }
 
-    private fun wakeWord(): String = prefs.getString("wake_word", "Астра")
+    private fun displayWakeWord(): String = prefs.getString("wake_word", "Астра")
         .orEmpty()
         .trim()
         .ifBlank { "Астра" }
-        .lowercase(Locale.getDefault())
+
+    private fun wakeWord(): String = normalize(displayWakeWord())
 
     override fun onPartialResult(hypothesis: String?) {
+        if (!running) return
         val text = jsonText(hypothesis, "partial")
         if (text.isBlank()) return
         when (mode) {
             Mode.WAITING -> detectWake(text, final = false)
             Mode.COMMAND -> {
                 val clean = stripWake(text)
-                if (clean.isNotBlank()) armCommandTimeout(1400L, clean)
+                if (clean.isNotBlank()) armCommandTimeout(1600L, clean)
             }
             Mode.PROCESSING -> Unit
         }
     }
 
     override fun onResult(hypothesis: String?) {
+        if (!running) return
         val text = jsonText(hypothesis, "text")
         if (text.isBlank()) return
         when (mode) {
@@ -159,12 +163,13 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
     override fun onFinalResult(hypothesis: String?) = onResult(hypothesis)
 
     override fun onError(exception: Exception?) {
+        if (!running) return
         updateNotification("Распознавание: ${exception?.message ?: "ошибка"}")
         restartListening(1200L)
     }
 
     override fun onTimeout() {
-        restartListening(500L)
+        if (running) restartListening(500L)
     }
 
     private fun detectWake(text: String, final: Boolean) {
@@ -172,16 +177,26 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
         val normalized = normalize(text)
         val index = normalized.indexOf(wake)
         if (index < 0) return
+
         val now = System.currentTimeMillis()
-        if (!final && now - lastWakeAt < 1300L) return
+        if (!final && now - lastWakeAt < 650L && mode == Mode.WAITING) return
         lastWakeAt = now
 
         val after = normalized.substring(index + wake.length).trim(' ', ',', '.', ':', '!', '?', '-')
-        if (after.isNotBlank() && final) {
-            processCommand(after)
+        if (after.isNotBlank()) {
+            if (final) {
+                processCommand(after)
+            } else {
+                mode = Mode.COMMAND
+                updateNotification("Слушаю: $after…")
+                armCommandTimeout(1700L, after)
+            }
             return
         }
-        enterCommandMode()
+
+        // If the user only said the name, wait for the next phrase. We intentionally
+        // wait for a final result here so saying «Астра, открой…» in one breath is not cut off.
+        if (final) enterCommandMode()
     }
 
     private fun enterCommandMode() {
@@ -189,12 +204,14 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
         mode = Mode.COMMAND
         speechService?.setPause(true)
         updateNotification("Слушаю команду…")
-        runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 55).apply {
-            startTone(ToneGenerator.TONE_PROP_BEEP, 90)
-            main.postDelayed({ release() }, 140)
-        } }
+        runCatching {
+            ToneGenerator(AudioManager.STREAM_NOTIFICATION, 55).apply {
+                startTone(ToneGenerator.TONE_PROP_BEEP, 90)
+                main.postDelayed({ release() }, 140)
+            }
+        }
         main.postDelayed({
-            if (mode == Mode.COMMAND) speechService?.setPause(false)
+            if (running && mode == Mode.COMMAND) speechService?.setPause(false)
         }, 220L)
         armCommandTimeout(8000L, null)
     }
@@ -203,7 +220,7 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
         commandTimeout?.let(main::removeCallbacks)
         val action = Runnable {
             commandTimeout = null
-            if (mode != Mode.COMMAND) return@Runnable
+            if (!running || mode != Mode.COMMAND) return@Runnable
             if (!fallback.isNullOrBlank()) processCommand(fallback) else returnToWake("Команда не услышана")
         }
         commandTimeout = action
@@ -212,7 +229,7 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
 
     private fun processCommand(raw: String) {
         val command = raw.trim()
-        if (command.isBlank() || mode == Mode.PROCESSING) return
+        if (command.isBlank() || mode == Mode.PROCESSING || !running) return
         commandTimeout?.let(main::removeCallbacks)
         commandTimeout = null
         mode = Mode.PROCESSING
@@ -222,7 +239,7 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
         worker.execute {
             val answer = runCatching { routeCommand(command) }
                 .getOrElse { "Не получилось выполнить запрос: ${it.message ?: "ошибка"}" }
-            main.post { speakThenReturn(answer) }
+            main.post { if (running) speakThenReturn(answer) }
         }
     }
 
@@ -281,14 +298,23 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
     }
 
     private fun returnToWake(message: String? = null) {
+        if (!running) return
+        commandTimeout?.let(main::removeCallbacks)
+        commandTimeout = null
+        speechService?.stop()
+        speechService?.shutdown()
+        speechService = null
         mode = Mode.WAITING
-        speechService?.setPause(false)
-        updateNotification(message ?: "Скажи «${wakeWord()}»")
-        if (message != null) {
-            main.postDelayed({
-                if (mode == Mode.WAITING) updateNotification("Скажи «${wakeWord()}»")
-            }, 1600L)
-        }
+        updateNotification(message ?: "Скажи «${displayWakeWord()}»")
+        main.postDelayed({
+            if (!running) return@postDelayed
+            startListening()
+            if (message != null) {
+                main.postDelayed({
+                    if (running && mode == Mode.WAITING) updateNotification("Скажи «${displayWakeWord()}»")
+                }, 1200L)
+            }
+        }, 280L)
     }
 
     private fun restartListening(delay: Long) {
@@ -296,7 +322,9 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
         speechService?.shutdown()
         speechService = null
         mode = Mode.WAITING
-        main.postDelayed({ if (prefs.getBoolean("wake_enabled", false)) startListening() }, delay)
+        main.postDelayed({
+            if (running && prefs.getBoolean("wake_enabled", false)) startListening()
+        }, delay)
     }
 
     override fun onInit(status: Int) {
@@ -330,9 +358,13 @@ class WakeWordService : Service(), RecognitionListener, TextToSpeech.OnInitListe
 
     private fun stripWake(value: String): String {
         val normalized = normalize(value)
-        val wake = normalize(wakeWord())
-        return normalized.replace(Regex("^.*?\\b${Regex.escape(wake)}\\b"), "").trim(' ', ',', '.', ':', '!', '?', '-')
-            .ifBlank { normalized.takeUnless { it == wake }.orEmpty() }
+        val wake = wakeWord()
+        val index = normalized.indexOf(wake)
+        return if (index >= 0) {
+            normalized.substring(index + wake.length).trim(' ', ',', '.', ':', '!', '?', '-')
+        } else {
+            normalized
+        }
     }
 
     private fun createChannel() {
