@@ -24,7 +24,7 @@ jobs:
           java-version: '17'
 
       - name: Check voice gateway Python syntax
-        run: python3 -m py_compile server/main.py
+        run: python3 -m py_compile server/main.py server/api.py
 
       - name: Install Android API 36
         shell: bash
@@ -73,5 +73,5 @@ jobs:
           else
             gh release create v0.5.0 AvtomaticAgent-v0.5.0.apk \
               --title "AvtomaticAgent v0.5.0" \
-              --notes "OpenAI Live SIP voice-agent gateway, outbound/inbound AI calls, voice mode, message agent and hand gestures."
+              --notes "OpenAI Live SIP voice-agent gateway, outbound/inbound AI calls, unified chat, message agent and hand gestures."
           fi
