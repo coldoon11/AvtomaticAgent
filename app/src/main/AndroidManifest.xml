@@ -10,6 +10,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
@@ -21,7 +22,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Autonomous AI"
+        android:label="Astra AI"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="true">
@@ -39,7 +40,7 @@
             android:name=".ScreenAccessibilityService"
             android:description="@string/accessibility_description"
             android:exported="false"
-            android:label="Autonomous AI — чтение и жесты"
+            android:label="Astra AI — чтение и жесты"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -52,12 +53,18 @@
         <service
             android:name=".MessageAgentService"
             android:exported="false"
-            android:label="Autonomous AI — агент сообщений"
+            android:label="Astra AI — агент сообщений"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <service
+            android:name=".WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            android:stopWithTask="false" />
 
         <service
             android:name=".HandGestureService"
