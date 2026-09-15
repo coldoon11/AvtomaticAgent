@@ -23,7 +23,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android API 37
+      - name: Install Android API 36
         shell: bash
         run: |
           SDKROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
@@ -34,7 +34,7 @@ jobs:
           fi
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platforms;android-37" "platform-tools"
+          "$SDKMANAGER" "platforms;android-36" "platform-tools"
 
       - name: Set up Gradle 9.6
         uses: gradle/actions/setup-gradle@v4
