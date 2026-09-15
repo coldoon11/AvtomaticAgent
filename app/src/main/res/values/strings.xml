@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Autonomous AI</string>
+    <string name="accessibility_description">Читает видимый текст экрана и позволяет пользователю управлять касаниями жестами руки. Поля паролей скрываются.</string>
+</resources>
