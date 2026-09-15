@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . ./
 
 ENV PYTHONUNBUFFERED=1
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8765} --proxy-headers"]
+CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-8765} --proxy-headers"]
