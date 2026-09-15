@@ -22,6 +22,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
@@ -40,15 +41,19 @@ class MainActivity : ComponentActivity() {
     private var voiceActive by mutableStateOf(false)
     private var notificationAccessEnabled by mutableStateOf(false)
     private var autoReplyEnabled by mutableStateOf(false)
+    private var aiCallRecording by mutableStateOf(false)
     private lateinit var prefs: android.content.SharedPreferences
     private var backendUrl by mutableStateOf("")
     private var apiToken by mutableStateOf("")
     private var pendingCallTarget: String? = null
+    private var pendingAiCall: AiCallCommand? = null
 
     private val callRegex = Regex(
         "^\\s*(?:позвони|позвонить|набери|позвоним|call)\\s+(.+?)\\s*$",
         RegexOption.IGNORE_CASE,
     )
+
+    private data class AiCallCommand(val target: String, val task: String)
 
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startGestureService() else status = "Для жестов нужна камера"
@@ -69,12 +74,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val aiCallContactPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val command = pendingAiCall
+        pendingAiCall = null
+        if (!granted || command == null) {
+            val answer = "Для AI-звонка по имени нужен доступ к контактам. Можно также произнести номер полностью."
+            status = answer
+            messages += ChatMessage(ChatMessage.Role.SYSTEM, answer)
+            if (voiceActive) voice.speak(answer)
+            return@registerForActivityResult
+        }
+        val answer = startAiCall(command)
+        messages += ChatMessage(ChatMessage.Role.ASSISTANT, answer)
+        if (voiceActive) voice.speak(answer)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("assistant_settings", MODE_PRIVATE)
         backendUrl = prefs.getString("backend_url", "http://192.168.1.2:8765").orEmpty()
         apiToken = prefs.getString("api_token", "").orEmpty()
         autoReplyEnabled = prefs.getBoolean("auto_reply_enabled", false)
+        aiCallRecording = prefs.getBoolean("ai_call_recording", false)
         launcher = AppLauncher(this)
         phone = PhoneCallHelper(this)
         voice = VoiceAssistantController(
@@ -84,7 +105,7 @@ class MainActivity : ComponentActivity() {
         )
         messages += ChatMessage(
             ChatMessage.Role.SYSTEM,
-            "Autonomous AI v0.4: чат, голос, запуск приложений, жесты, звонки и агент сообщений.",
+            "Autonomous AI v0.5: голос, сообщения, AI-звонки через SIP, обычные звонки, приложения и жесты.",
         )
         setContent { AppUi() }
     }
@@ -107,6 +128,14 @@ class MainActivity : ComponentActivity() {
         if (text.isBlank() || busy) return
         messages += ChatMessage(ChatMessage.Role.USER, text)
         input = ""
+
+        val aiCall = parseAiCall(text)
+        if (aiCall != null) {
+            val response = startAiCall(aiCall)
+            messages += ChatMessage(ChatMessage.Role.ASSISTANT, response)
+            if (voiceActive) voice.speak(response)
+            return
+        }
 
         val call = callRegex.find(text)
         if (call != null) {
@@ -152,6 +181,59 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun parseAiCall(text: String): AiCallCommand? {
+        val original = text.trim()
+        val lower = original.lowercase(Locale.getDefault())
+        val prefixes = listOf("ии позвони ", "ai позвони ", "ai call ", "агент позвони ", "агент набери ")
+        val prefix = prefixes.firstOrNull { lower.startsWith(it) } ?: return null
+        val rest = original.substring(prefix.length).trim()
+        if (rest.isBlank()) return null
+        val parts = rest.split(":", limit = 2)
+        val target = parts.first().trim()
+        if (target.isBlank()) return null
+        val task = parts.getOrNull(1)?.trim().orEmpty().ifBlank {
+            "Поздоровайся, скажи, что ты ИИ-помощник, и спроси, удобно ли сейчас разговаривать."
+        }
+        return AiCallCommand(target, task)
+    }
+
+    private fun startAiCall(command: AiCallCommand): String {
+        if (backendUrl.isBlank()) return "Сначала укажи URL backend-сервера."
+
+        if (!phone.looksLikeNumber(command.target) &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingAiCall = command
+            aiCallContactPermission.launch(Manifest.permission.READ_CONTACTS)
+            return "Разреши доступ к контактам, чтобы найти номер «${command.target}»."
+        }
+
+        val number = phone.resolveNumber(command.target)
+            ?: return "Не нашёл номер для «${command.target}». Скажи номер в международном формате, например +370…"
+
+        busy = true
+        status = "AI готовит звонок…"
+        worker.execute {
+            val result = runCatching {
+                backend.aiCall(backendUrl, apiToken, number, command.task, aiCallRecording)
+            }
+            runOnUiThread {
+                busy = false
+                result.onSuccess {
+                    messages += ChatMessage(ChatMessage.Role.ASSISTANT, it)
+                    status = "AI-звонок запущен"
+                    if (voiceActive) voice.speak(it)
+                }.onFailure {
+                    val error = "AI-звонок не запущен: ${it.message}"
+                    messages += ChatMessage(ChatMessage.Role.SYSTEM, error)
+                    status = error
+                    if (voiceActive) voice.speak("Не удалось начать AI-звонок")
+                }
+            }
+        }
+        return "Передаю звонок AI-агенту. Он представится как ИИ-помощник и будет выполнять указанную цель."
+    }
+
     private fun handleCall(target: String): String {
         val needed = mutableListOf<String>()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
@@ -165,7 +247,7 @@ class MainActivity : ComponentActivity() {
         if (needed.isNotEmpty()) {
             pendingCallTarget = target
             callPermissions.launch(needed.toTypedArray())
-            return "Нужно разрешение Android для звонка. Показываю запрос."
+            return "Нужно разрешение Android для обычного звонка. Показываю запрос."
         }
         return runCatching { phone.placeCall(target) }
             .getOrElse { "Не удалось начать звонок: ${it.message}" }
@@ -227,7 +309,7 @@ class MainActivity : ComponentActivity() {
             Surface(Modifier.fillMaxSize()) {
                 Column(Modifier.fillMaxSize().padding(12.dp)) {
                     Text("Autonomous AI", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("голос • сообщения • звонки • приложения • жесты", style = MaterialTheme.typography.bodySmall)
+                    Text("голос • сообщения • AI-звонки • приложения • жесты", style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(8.dp))
                     Card {
                         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -240,7 +322,7 @@ class MainActivity : ComponentActivity() {
                             OutlinedTextField(
                                 value = apiToken,
                                 onValueChange = { apiToken = it; prefs.edit().putString("api_token", it).apply() },
-                                label = { Text("Токен (если сервер требует)") },
+                                label = { Text("Токен backend") },
                                 visualTransformation = PasswordVisualTransformation(),
                                 modifier = Modifier.fillMaxWidth(), singleLine = true,
                             )
@@ -271,6 +353,21 @@ class MainActivity : ComponentActivity() {
                                 Spacer(Modifier.width(8.dp))
                                 Text("Автоответ в Telegram / WhatsApp / Signal")
                             }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Switch(
+                                    checked = aiCallRecording,
+                                    onCheckedChange = {
+                                        aiCallRecording = it
+                                        prefs.edit().putBoolean("ai_call_recording", it).apply()
+                                    },
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Запрашивать запись AI-звонка")
+                            }
+                            Text(
+                                "AI-звонок: «ИИ позвони Мама: узнай, сможет ли она созвониться вечером». Запись также должна быть разрешена на backend.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                             Text(status, style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -297,7 +394,7 @@ class MainActivity : ComponentActivity() {
                         OutlinedTextField(
                             value = input,
                             onValueChange = { input = it },
-                            label = { Text("Сообщение или «позвони Мама»") },
+                            label = { Text("Сообщение / «ИИ позвони Мама: ...»") },
                             modifier = Modifier.weight(1f),
                         )
                         Button(onClick = { submit(input) }, enabled = input.isNotBlank() && !busy) { Text("Отпр.") }
