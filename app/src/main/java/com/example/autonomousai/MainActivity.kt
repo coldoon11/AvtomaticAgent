@@ -5,20 +5,26 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -39,14 +45,17 @@ class MainActivity : ComponentActivity() {
     private var accessibilityEnabled by mutableStateOf(false)
     private var gestureRunning by mutableStateOf(false)
     private var voiceActive by mutableStateOf(false)
+    private var wakeEnabled by mutableStateOf(false)
     private var notificationAccessEnabled by mutableStateOf(false)
     private var autoReplyEnabled by mutableStateOf(false)
     private var aiCallRecording by mutableStateOf(false)
+    private var wakeWord by mutableStateOf("Астра")
     private lateinit var prefs: android.content.SharedPreferences
     private var backendUrl by mutableStateOf("")
     private var apiToken by mutableStateOf("")
     private var pendingCallTarget: String? = null
     private var pendingAiCall: AiCallCommand? = null
+    private var resumeWakeAfterVoice = false
 
     private val callRegex = Regex(
         "^\\s*(?:позвони|позвонить|набери|позвоним|call)\\s+(.+?)\\s*$",
@@ -61,6 +70,13 @@ class MainActivity : ComponentActivity() {
 
     private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startVoiceMode() else status = "Для голосового режима нужен микрофон"
+    }
+
+    private val wakePermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        val micGranted = result[Manifest.permission.RECORD_AUDIO] ?: (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+        if (micGranted) startWakeService() else status = "Для фоновой Astra нужен доступ к микрофону"
     }
 
     private val callPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -96,6 +112,7 @@ class MainActivity : ComponentActivity() {
         apiToken = prefs.getString("api_token", "").orEmpty()
         autoReplyEnabled = prefs.getBoolean("auto_reply_enabled", false)
         aiCallRecording = prefs.getBoolean("ai_call_recording", false)
+        wakeWord = prefs.getString("wake_word", "Астра").orEmpty().ifBlank { "Астра" }
         launcher = AppLauncher(this)
         phone = PhoneCallHelper(this)
         voice = VoiceAssistantController(
@@ -105,7 +122,7 @@ class MainActivity : ComponentActivity() {
         )
         messages += ChatMessage(
             ChatMessage.Role.SYSTEM,
-            "Autonomous AI v0.5: голос, сообщения, AI-звонки через SIP, обычные звонки, приложения и жесты.",
+            "Astra v0.6 готова. Включи фоновый режим и обращайся по имени «$wakeWord».",
         )
         setContent { AppUi() }
     }
@@ -114,6 +131,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         accessibilityEnabled = isAccessibilityServiceEnabled()
         gestureRunning = HandGestureService.running
+        wakeEnabled = WakeWordService.running
         notificationAccessEnabled = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
     }
 
@@ -154,7 +172,7 @@ class MainActivity : ComponentActivity() {
 
         if (backendUrl.isBlank()) {
             status = "Укажи URL backend"
-            val answer = "Сначала укажи адрес backend-сервера."
+            val answer = "Сначала укажи адрес backend-сервера в настройках."
             messages += ChatMessage(ChatMessage.Role.SYSTEM, answer)
             if (voiceActive && fromVoice) voice.speak(answer)
             return
@@ -253,11 +271,62 @@ class MainActivity : ComponentActivity() {
             .getOrElse { "Не удалось начать звонок: ${it.message}" }
     }
 
+    private fun toggleWake() {
+        if (wakeEnabled || WakeWordService.running) {
+            stopWakeService()
+            return
+        }
+        val needed = mutableListOf<String>()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            needed += Manifest.permission.RECORD_AUDIO
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            needed += Manifest.permission.POST_NOTIFICATIONS
+        }
+        if (needed.isNotEmpty()) {
+            wakePermissions.launch(needed.toTypedArray())
+        } else {
+            startWakeService()
+        }
+    }
+
+    private fun startWakeService() {
+        if (voiceActive) {
+            voice.stop()
+            voiceActive = false
+        }
+        prefs.edit().putBoolean("wake_enabled", true).apply()
+        ContextCompat.startForegroundService(this, Intent(this, WakeWordService::class.java))
+        wakeEnabled = true
+        status = "Фоновая Astra включена"
+    }
+
+    private fun stopWakeService() {
+        prefs.edit().putBoolean("wake_enabled", false).apply()
+        stopService(Intent(this, WakeWordService::class.java))
+        wakeEnabled = false
+        resumeWakeAfterVoice = false
+        status = "Фоновая Astra выключена"
+    }
+
     private fun toggleVoice() {
         if (voiceActive) {
             voice.stop()
             voiceActive = false
+            status = "Голосовой разговор выключен"
+            if (resumeWakeAfterVoice) {
+                resumeWakeAfterVoice = false
+                startWakeService()
+            }
             return
+        }
+        if (wakeEnabled || WakeWordService.running) {
+            resumeWakeAfterVoice = true
+            prefs.edit().putBoolean("wake_enabled", false).apply()
+            stopService(Intent(this, WakeWordService::class.java))
+            wakeEnabled = false
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
@@ -273,7 +342,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startGestureService() {
         if (!accessibilityEnabled || !ScreenAccessibilityService.isConnected()) {
-            status = "Сначала включи Accessibility для Autonomous AI"
+            status = "Сначала включи Accessibility для Astra AI"
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             return
         }
@@ -305,103 +374,268 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun AppUi() {
-        MaterialTheme {
-            Surface(Modifier.fillMaxSize()) {
-                Column(Modifier.fillMaxSize().padding(12.dp)) {
-                    Text("Autonomous AI", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("голос • сообщения • AI-звонки • приложения • жесты", style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(8.dp))
-                    Card {
-                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                            OutlinedTextField(
-                                value = backendUrl,
-                                onValueChange = { backendUrl = it; prefs.edit().putString("backend_url", it).apply() },
-                                label = { Text("URL backend") },
-                                modifier = Modifier.fillMaxWidth(), singleLine = true,
-                            )
-                            OutlinedTextField(
-                                value = apiToken,
-                                onValueChange = { apiToken = it; prefs.edit().putString("api_token", it).apply() },
-                                label = { Text("Токен backend") },
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier.fillMaxWidth(), singleLine = true,
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
-                                    Text(if (accessibilityEnabled) "Accessibility ✓" else "Accessibility")
-                                }
-                                Button(onClick = { if (gestureRunning) stopGestureService() else startGestureService() }) {
-                                    Text(if (gestureRunning) "Стоп жесты" else "Жесты руки")
-                                }
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { toggleVoice() }) {
-                                    Text(if (voiceActive) "Стоп голос" else "Голосовой режим")
-                                }
-                                Button(onClick = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) {
-                                    Text(if (notificationAccessEnabled) "Уведомления ✓" else "Доступ к сообщениям")
-                                }
-                            }
+        var showSettings by remember { mutableStateOf(false) }
+        val colors = if (isSystemInDarkTheme()) {
+            darkColorScheme(
+                primary = Color(0xFF9BB7FF),
+                background = Color(0xFF0B0D10),
+                surface = Color(0xFF12151A),
+                surfaceVariant = Color(0xFF1B2027),
+            )
+        } else {
+            lightColorScheme(
+                primary = Color(0xFF345D9D),
+                background = Color(0xFFF7F8FA),
+                surface = Color(0xFFFFFFFF),
+                surfaceVariant = Color(0xFFF0F2F5),
+            )
+        }
+
+        MaterialTheme(colorScheme = colors) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Column(
+                    Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column {
+                            Text("Astra", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                            Text("личный AI-агент", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = { showSettings = true }) { Text("Настройки") }
+                    }
+
+                    ElevatedCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(28.dp),
+                    ) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Switch(
-                                    checked = autoReplyEnabled,
-                                    onCheckedChange = {
-                                        autoReplyEnabled = it
-                                        prefs.edit().putBoolean("auto_reply_enabled", it).apply()
-                                    },
+                                Surface(
+                                    modifier = Modifier.size(12.dp),
+                                    shape = CircleShape,
+                                    color = if (wakeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                ) {}
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    if (wakeEnabled) "Фоновый помощник активен" else if (busy) "Выполняю запрос" else "Готова к работе",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
                                 )
-                                Spacer(Modifier.width(8.dp))
-                                Text("Автоответ в Telegram / WhatsApp / Signal")
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Switch(
-                                    checked = aiCallRecording,
-                                    onCheckedChange = {
-                                        aiCallRecording = it
-                                        prefs.edit().putBoolean("ai_call_recording", it).apply()
-                                    },
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text("Запрашивать запись AI-звонка")
                             }
                             Text(
-                                "AI-звонок: «ИИ позвони Мама: узнай, сможет ли она созвониться вечером». Запись также должна быть разрешена на backend.",
-                                style = MaterialTheme.typography.bodySmall,
+                                if (wakeEnabled) "Скажи «$wakeWord», затем команду. После ответа Astra снова перейдёт в ожидание."
+                                else "Включи фоновый режим, чтобы Astra слышала ключевую фразу даже после сворачивания приложения.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Text(status, style = MaterialTheme.typography.bodySmall)
+                            Button(
+                                onClick = { toggleWake() },
+                                modifier = Modifier.fillMaxWidth().height(52.dp),
+                                shape = RoundedCornerShape(18.dp),
+                            ) {
+                                Text(if (wakeEnabled) "Выключить фоновый режим" else "Включить «$wakeWord»")
+                            }
+                            Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(messages) { msg ->
-                            Card(Modifier.fillMaxWidth()) {
-                                Column(Modifier.padding(10.dp)) {
+
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = { toggleVoice() },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(18.dp),
+                        ) { Text(if (voiceActive) "Стоп разговор" else "Разговор") }
+                        OutlinedButton(
+                            onClick = { if (gestureRunning) stopGestureService() else startGestureService() },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(18.dp),
+                        ) { Text(if (gestureRunning) "Стоп жесты" else "Жесты") }
+                    }
+
+                    ElevatedCard(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            FeatureToggle(
+                                title = "Автоответы",
+                                subtitle = if (notificationAccessEnabled) "Telegram • WhatsApp • Signal" else "Нужен доступ к уведомлениям",
+                                checked = autoReplyEnabled,
+                                onCheckedChange = {
+                                    autoReplyEnabled = it
+                                    prefs.edit().putBoolean("auto_reply_enabled", it).apply()
+                                    if (it && !notificationAccessEnabled) {
+                                        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                                    }
+                                },
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Доступ к экрану", fontWeight = FontWeight.Medium)
                                     Text(
-                                        when (msg.role) {
-                                            ChatMessage.Role.USER -> "Ты"
-                                            ChatMessage.Role.ASSISTANT -> "AI"
-                                            ChatMessage.Role.SYSTEM -> "Система"
-                                        },
-                                        fontWeight = FontWeight.SemiBold,
+                                        if (accessibilityEnabled) "Accessibility включён" else "Нужен для жестов и контекста экрана",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    Text(msg.text)
+                                }
+                                TextButton(onClick = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
+                                    Text(if (accessibilityEnabled) "Включён" else "Настроить")
                                 }
                             }
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+
+                    Text("Диалог", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    LazyColumn(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(messages) { msg -> MessageBubble(msg) }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         OutlinedTextField(
                             value = input,
                             onValueChange = { input = it },
-                            label = { Text("Сообщение / «ИИ позвони Мама: ...»") },
+                            placeholder = { Text("Спроси или дай команду…", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(20.dp),
+                            maxLines = 4,
                         )
-                        Button(onClick = { submit(input) }, enabled = input.isNotBlank() && !busy) { Text("Отпр.") }
+                        Button(
+                            onClick = { submit(input) },
+                            enabled = input.isNotBlank() && !busy,
+                            modifier = Modifier.height(56.dp),
+                            shape = RoundedCornerShape(18.dp),
+                        ) { Text("→") }
                     }
                 }
             }
+
+            if (showSettings) {
+                SettingsDialog(onDismiss = { showSettings = false })
+            }
         }
+    }
+
+    @Composable
+    private fun FeatureToggle(
+        title: String,
+        subtitle: String,
+        checked: Boolean,
+        onCheckedChange: (Boolean) -> Unit,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.Medium)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        }
+    }
+
+    @Composable
+    private fun MessageBubble(msg: ChatMessage) {
+        val user = msg.role == ChatMessage.Role.USER
+        Box(
+            Modifier.fillMaxWidth(),
+            contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart,
+        ) {
+            Surface(
+                modifier = Modifier.widthIn(max = 340.dp),
+                shape = RoundedCornerShape(18.dp),
+                color = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    Text(
+                        when (msg.role) {
+                            ChatMessage.Role.USER -> "Ты"
+                            ChatMessage.Role.ASSISTANT -> "Astra"
+                            ChatMessage.Role.SYSTEM -> "Система"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(msg.text)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun SettingsDialog(onDismiss: () -> Unit) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            shape = RoundedCornerShape(26.dp),
+            title = { Text("Настройки Astra") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = wakeWord,
+                        onValueChange = {
+                            wakeWord = it.take(32)
+                            prefs.edit().putString("wake_word", wakeWord.trim()).apply()
+                        },
+                        label = { Text("Ключевое имя") },
+                        supportingText = { Text("Например: Астра. Необычные слова могут распознаваться хуже.") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = backendUrl,
+                        onValueChange = {
+                            backendUrl = it
+                            prefs.edit().putString("backend_url", it).apply()
+                        },
+                        label = { Text("URL backend") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = apiToken,
+                        onValueChange = {
+                            apiToken = it
+                            prefs.edit().putString("api_token", it).apply()
+                        },
+                        label = { Text("Токен backend") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    FeatureToggle(
+                        title = "Запись AI-звонков",
+                        subtitle = "Работает только если разрешена на backend",
+                        checked = aiCallRecording,
+                        onCheckedChange = {
+                            aiCallRecording = it
+                            prefs.edit().putBoolean("ai_call_recording", it).apply()
+                        },
+                    )
+                    Text(
+                        "Ожидание ключевой фразы работает локально на телефоне. Фоновый микрофон всегда сопровождается системным уведомлением Android.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("Готово") } },
+        )
     }
 
     companion object {
