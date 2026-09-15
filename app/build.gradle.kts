@@ -25,24 +25,6 @@ android {
     }
 }
 
-val handModel = layout.projectDirectory.file("src/main/assets/hand_landmarker.task")
-val downloadHandModel by tasks.registering {
-    outputs.file(handModel)
-    doLast {
-        val target = handModel.asFile
-        if (!target.exists()) {
-            target.parentFile.mkdirs()
-            val url = java.net.URI(
-                "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
-            ).toURL()
-            println("Downloading MediaPipe hand_landmarker.task …")
-            url.openStream().use { input -> target.outputStream().use { output -> input.copyTo(output) } }
-        }
-    }
-}
-
-tasks.named("preBuild").configure { dependsOn(downloadHandModel) }
-
 dependencies {
     implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.activity:activity-compose:1.13.0")
