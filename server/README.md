@@ -1,9 +1,10 @@
 # Voice/SIP backend — v0.5
 
-This backend lets the Android app place an AI phone call through **Twilio Programmable Voice -> SIP -> OpenAI Live (`gpt-live-1`)**. The OpenAI and Twilio secrets stay on the server; never put them inside the APK.
+This backend serves the Android AI chat/auto-reply features and lets the app place an AI phone call through **Twilio Programmable Voice -> SIP -> OpenAI Live (`gpt-live-1`)**. The OpenAI and Twilio secrets stay on the server; never put them inside the APK.
 
 ## What works
 
+- `POST /chat` powers normal app chat, Android voice-mode answers and messenger auto-replies using `OPENAI_CHAT_MODEL`.
 - `POST /phone/call` starts an outbound PSTN call from your Twilio number and bridges the answered call to OpenAI Live over SIP.
 - `POST /openai/webhook` verifies the OpenAI webhook and accepts the pending Live SIP session.
 - The call instructions always tell the model to disclose that it is an AI assistant acting on the owner's behalf.
@@ -18,7 +19,7 @@ This backend lets the Android app place an AI phone call through **Twilio Progra
 2. In the same OpenAI project, create a webhook pointing to `https://YOUR_DOMAIN/openai/webhook` and subscribe it to `live.transport.incoming`. Copy the `whsec_...` signing secret.
 3. Create a Twilio account and buy a voice-capable number. Trial accounts can only call verified destinations.
 4. Copy `.env.example` to `.env` on your server and fill in the OpenAI/Twilio values. Use a long random `AGENT_API_TOKEN`.
-5. Deploy this folder to a public HTTPS server (Render/Railway/Fly.io/VPS are all fine) and run `uvicorn main:app --host 0.0.0.0 --port 8765 --proxy-headers`.
+5. Deploy this folder to a public HTTPS server (Render/Railway/Fly.io/VPS are all fine) and run `uvicorn api:app --host 0.0.0.0 --port 8765 --proxy-headers`.
 6. For inbound AI calls, set the Twilio phone number's Voice webhook to `POST https://YOUR_DOMAIN/twilio/incoming`, then set `AI_INBOUND_CALLS_ENABLED=true`.
 7. In the Android app set **URL backend** to `https://YOUR_DOMAIN` and **Токен** to the same `AGENT_API_TOKEN`.
 
