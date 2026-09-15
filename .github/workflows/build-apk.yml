@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -46,6 +46,23 @@ jobs:
             -o app/src/main/assets/hand_landmarker.task
           test -s app/src/main/assets/hand_landmarker.task
 
+      - name: Download Vosk Russian mobile model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fL --retry 3 \
+            "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip" \
+            -o /tmp/vosk-ru.zip
+          rm -rf /tmp/vosk-ru app/src/main/assets/model-ru
+          mkdir -p /tmp/vosk-ru
+          unzip -q /tmp/vosk-ru.zip -d /tmp/vosk-ru
+          mv /tmp/vosk-ru/vosk-model-small-ru-0.22 app/src/main/assets/model-ru
+          python3 - <<'PY' > app/src/main/assets/model-ru/uuid
+          import uuid
+          print(uuid.uuid4())
+          PY
+          test -s app/src/main/assets/model-ru/am/final.mdl
+          test -s app/src/main/assets/model-ru/uuid
+
       - name: Set up Gradle 9.6
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -55,23 +72,23 @@ jobs:
         run: gradle :app:assembleDebug --stacktrace
 
       - name: Prepare APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk AvtomaticAgent-v0.5.0.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk AvtomaticAgent-v0.6.0.apk
 
       - name: Upload Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AvtomaticAgent-v0.5.0
-          path: AvtomaticAgent-v0.5.0.apk
+          name: AvtomaticAgent-v0.6.0
+          path: AvtomaticAgent-v0.6.0.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.5.0 >/dev/null 2>&1; then
-            gh release upload v0.5.0 AvtomaticAgent-v0.5.0.apk --clobber
+          if gh release view v0.6.0 >/dev/null 2>&1; then
+            gh release upload v0.6.0 AvtomaticAgent-v0.6.0.apk --clobber
           else
-            gh release create v0.5.0 AvtomaticAgent-v0.5.0.apk \
-              --title "AvtomaticAgent v0.5.0" \
-              --notes "OpenAI Live SIP voice-agent gateway, outbound/inbound AI calls, unified chat, message agent and hand gestures."
+            gh release create v0.6.0 AvtomaticAgent-v0.6.0.apk \
+              --title "AvtomaticAgent v0.6.0" \
+              --notes "Background offline wake phrase, modern minimalist UI, AI calls, messaging agent and hand gestures."
           fi
