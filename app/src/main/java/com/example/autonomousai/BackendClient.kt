@@ -99,6 +99,40 @@ class BackendClient {
         }
     }
 
+    fun aiCall(
+        baseUrl: String,
+        token: String,
+        number: String,
+        task: String,
+        record: Boolean,
+    ): String {
+        val conn = connection(baseUrl, "/phone/call", token, "POST")
+        conn.doOutput = true
+        conn.readTimeout = 30_000
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        val payload = JSONObject()
+            .put("number", number)
+            .put("task", task)
+            .put("record", record)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        conn.outputStream.use { it.write(payload) }
+        return try {
+            val body = readText(conn)
+            if (conn.responseCode !in 200..299) error(serverError(conn.responseCode, body))
+            val json = JSONObject(body)
+            val jobId = json.optString("job_id")
+            val recording = json.optBoolean("recording", false)
+            buildString {
+                append("AI-звонок запущен")
+                if (jobId.isNotBlank()) append(". ID: ").append(jobId.take(12))
+                append(if (recording) ". Запись включена." else ". Запись выключена.")
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     private fun readText(conn: HttpURLConnection): String {
         val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
         if (stream == null) return ""
@@ -106,7 +140,13 @@ class BackendClient {
     }
 
     private fun serverError(code: Int, body: String): String {
-        val message = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
-        return if (message.isNotBlank()) "Сервер: $message" else "HTTP $code"
+        val parsed = runCatching { JSONObject(body) }.getOrNull()
+        val detail = parsed?.optString("detail").orEmpty()
+        val message = parsed?.optString("error").orEmpty()
+        return when {
+            detail.isNotBlank() -> "Сервер: $detail"
+            message.isNotBlank() -> "Сервер: $message"
+            else -> "HTTP $code"
+        }
     }
 }
