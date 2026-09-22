@@ -99,6 +99,36 @@ class BackendClient {
         }
     }
 
+
+    fun messageReply(
+        baseUrl: String,
+        token: String,
+        platform: String,
+        sender: String,
+        text: String,
+        styleSamples: String,
+    ): String {
+        val conn = connection(baseUrl, "/message/reply", token, "POST")
+        conn.doOutput = true
+        conn.readTimeout = 60_000
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        val payload = JSONObject()
+            .put("platform", platform)
+            .put("sender", sender)
+            .put("text", text)
+            .put("style_samples", styleSamples.take(12_000))
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        conn.outputStream.use { it.write(payload) }
+        return try {
+            val body = readText(conn)
+            if (conn.responseCode !in 200..299) error(serverError(conn.responseCode, body))
+            JSONObject(body).optString("reply").trim().ifBlank { "Ок" }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     fun aiCall(
         baseUrl: String,
         token: String,
